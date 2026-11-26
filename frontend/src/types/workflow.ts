@@ -171,6 +171,19 @@ export interface TriageConclusion {
   pendingDetails: string;
 }
 
+export interface CliApproval {
+  id: string;
+  kind: 'command' | 'network' | 'file_change' | 'permissions';
+  reason?: string;
+  cwd?: string;
+  command?: string;
+  network?: { host: string; protocol: string };
+  paths?: string[];
+  grantRoot?: string;
+  permissions?: Record<string, unknown>;
+  canApprove: boolean;
+}
+
 export interface OrchestratorState {
   workflowId: string;
   worktreePath: string;
@@ -189,6 +202,7 @@ export interface OrchestratorState {
   plan: WorkflowPlan | null;
   planArtifactPath: string | null;
   reviewRounds: CodeReviewRound[];
+  pendingApprovals?: CliApproval[];
   events: OrchestratorEvent[];
   liveLog: string;
   error: string | null;

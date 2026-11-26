@@ -16,7 +16,8 @@ import {
   replanBlock1,
   approvePlanAndStartBlock2,
   resumeBlock2,
-  stopWorkflow
+  stopWorkflow,
+  decideCliApproval
 } from './orchestrator.js';
 
 const execFileAsync = promisify(execFile);
@@ -406,6 +407,23 @@ app.get('/api/orchestrator/:workflowId/stream', (req, res) => {
   const { workflowId } = req.params;
   const worktreePath = req.query.worktreePath ? String(req.query.worktreePath) : '';
   subscribeWorkflowStream(workflowId, worktreePath, res);
+});
+
+app.post('/api/orchestrator/:workflowId/approvals/:approvalId', (req, res) => {
+  const origin = req.get('Origin');
+  if (origin && !/^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(origin)) {
+    return res.status(403).json({ error: 'Responda ao pedido pela aplicação local.' });
+  }
+
+  const { workflowId, approvalId } = req.params;
+  const decision = req.body?.decision;
+  if (decision !== 'approve' && decision !== 'deny') {
+    return res.status(400).json({ error: 'Selecione Aprovar ou Negar.' });
+  }
+  if (!decideCliApproval(workflowId, approvalId, decision)) {
+    return res.status(409).json({ error: 'Esta decisão não está disponível para o pedido do CLI.' });
+  }
+  res.status(204).end();
 });
 
 app.post('/api/orchestrator/start-block1', (req, res) => {

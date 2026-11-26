@@ -3,6 +3,7 @@ import fs from 'fs';
 import { devNull } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { startCodexSubagent } from './codex-app-server.js';
 
 const MAX_SUBTASK_ATTEMPTS = 4;
 const MAX_REVIEW_ROUNDS = 3;
@@ -109,6 +110,7 @@ function getOrCreateSession(workflowId, worktreePath) {
       state,
       running: false,
       abortController: null,
+      codexRun: null,
       sseClients: new Set()
     };
     sessions.set(workflowId, session);
@@ -118,10 +120,14 @@ function getOrCreateSession(workflowId, worktreePath) {
   return session;
 }
 
+function workflowSnapshot(session) {
+  return { ...session.state, pendingApprovals: session.codexRun?.getPendingApprovals() ?? [] };
+}
+
 function broadcastState(session) {
   session.state.updatedAt = nowIso();
   saveStateToDisk(session.state);
-  const payload = `event: state\ndata: ${JSON.stringify(session.state)}\n\n`;
+  const payload = `event: state\ndata: ${JSON.stringify(workflowSnapshot(session))}\n\n`;
   for (const res of session.sseClients) {
     try {
       res.write(payload);
@@ -170,8 +176,8 @@ function buildCliInvocation(cliCommand, prompt, readOnly) {
     return { bin: cliCommand, args };
   }
   if (base === 'codex') {
-    const sandbox = readOnly ? 'read-only' : 'workspace-write';
-    return { bin: cliCommand, args: ['--ask-for-approval', 'never', 'exec', '--sandbox', sandbox, prompt] };
+    if (!readOnly) return { bin: cliCommand, appServer: true };
+    return { bin: cliCommand, args: ['--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', prompt] };
   }
   if (base === 'gemini') {
     const args = readOnly
@@ -203,14 +209,30 @@ function buildCliInvocation(cliCommand, prompt, readOnly) {
  * Executa um subagente completamente isolado via processo filho do CLI escolhido.
  * Nenhum histórico de conversa é compartilhado entre subagentes; apenas os artefatos em disco.
  */
-function runIsolatedCliSubagent({ session, cliCommand, worktreePath, prompt, label, signal, readOnly = false }) {
-  return new Promise((resolve, reject) => {
-    const { bin, args } = buildCliInvocation(cliCommand, prompt, readOnly);
-    appendLiveLog(
-      session,
-      `\n==================== [${label}] CLI isolado: ${bin} ====================\n`
-    );
+async function runIsolatedCliSubagent({ session, cliCommand, worktreePath, prompt, label, signal, readOnly = false }) {
+  const { bin, args, appServer } = buildCliInvocation(cliCommand, prompt, readOnly);
+  appendLiveLog(session, `\n==================== [${label}] CLI isolado: ${bin} ====================\n`);
 
+  if (appServer) {
+    const run = startCodexSubagent({
+      cliCommand: bin,
+      worktreePath,
+      prompt,
+      signal,
+      onLog: (chunk) => appendLiveLog(session, chunk),
+      onApprovalsChange: () => broadcastState(session)
+    });
+    session.codexRun = run;
+    try {
+      const result = await run.completion;
+      appendLiveLog(session, `\n--- [${label}] concluído ---\n`);
+      return result;
+    } finally {
+      session.codexRun = null;
+    }
+  }
+
+  return new Promise((resolve, reject) => {
     let child;
     try {
       child = spawn(bin, args, {
@@ -1135,8 +1157,12 @@ async function runBlock2AndBlock3Loop(session, { cliCommand, cliName, prompts })
 }
 
 export function getWorkflowState(workflowId, worktreePath) {
-  const session = getOrCreateSession(workflowId, worktreePath);
-  return session.state;
+  return workflowSnapshot(getOrCreateSession(workflowId, worktreePath));
+}
+
+export function decideCliApproval(workflowId, approvalId, decision) {
+  const session = sessions.get(workflowId);
+  return session?.codexRun?.decideApproval(approvalId, decision) ?? false;
 }
 
 export function subscribeWorkflowStream(workflowId, worktreePath, res) {
@@ -1149,7 +1175,7 @@ export function subscribeWorkflowStream(workflowId, worktreePath, res) {
   });
 
   session.sseClients.add(res);
-  res.write(`event: state\ndata: ${JSON.stringify(session.state)}\n\n`);
+  res.write(`event: state\ndata: ${JSON.stringify(workflowSnapshot(session))}\n\n`);
 
   const heartbeat = setInterval(() => {
     try {

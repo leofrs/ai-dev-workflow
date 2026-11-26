@@ -6,10 +6,14 @@ import {
   PlanSubtask,
   ProjectPrompts,
   TriageConclusion,
+  WORKFLOW_STAGES,
   WorkflowBlockId,
   WorkflowStatus
 } from '../types/workflow';
 import { WebTerminal } from './WebTerminal';
+import { CliApprovalCard } from './CliApprovalCard';
+import { ModalDialog } from './ModalDialog';
+import { MarkdownContent } from './MarkdownContent';
 import {
   Sparkles,
   GitBranch,
@@ -383,19 +387,26 @@ export const TriageWorkspace: React.FC<TriageWorkspaceProps> = ({
 }) => {
   const [selectedBlock, setSelectedBlock] = useState<WorkflowBlockId>('block1_triage_planning');
   const [orchState, setOrchState] = useState<OrchestratorState | null>(null);
+  const [approvalState, setApprovalState] = useState<
+    Pick<OrchestratorState, 'workflowId' | 'activeAgent' | 'pendingApprovals'> | null
+  >(null);
   const [liveLog, setLiveLog] = useState<string>('');
   const [apiError, setApiError] = useState<string | null>(null);
   const [replanFeedback, setReplanFeedback] = useState('');
   const [showReplanInput, setShowReplanInput] = useState(false);
-  const [activityTab, setActivityTab] = useState<'events' | 'log'>('events');
+  const [activityTab, setActivityTab] = useState<'events' | 'log' | 'approvals'>('events');
   const [showTerminal, setShowTerminal] = useState(false);
   const [copiedReview, setCopiedReview] = useState(false);
   const [expandedSubtasks, setExpandedSubtasks] = useState<Record<string, boolean>>({});
+  const [isPendingCollapsed, setIsPendingCollapsed] = useState(false);
+  const [showPendingModal, setShowPendingModal] = useState(false);
   const [terminalCommands, setTerminalCommands] = useState<
     Record<string, { id: number; command: string }>
   >({});
 
   const activityDialogId = useId();
+  const pendingDialogId = useId();
+  const pendingContentId = useId();
   const activityDialogRef = useRef<HTMLDialogElement>(null);
   const activityBackdropPressedRef = useRef(false);
   const logRef = useRef<HTMLDivElement>(null);
@@ -406,7 +417,10 @@ export const TriageWorkspace: React.FC<TriageWorkspaceProps> = ({
   useEffect(() => {
     setApiError(null);
     setOrchState(null);
+    setApprovalState(null);
     setLiveLog('');
+    setShowPendingModal(false);
+    setIsPendingCollapsed(false);
     lastAutoBlockRef.current = null;
 
     const url = `http://localhost:3001/api/orchestrator/${encodeURIComponent(
@@ -421,6 +435,11 @@ export const TriageWorkspace: React.FC<TriageWorkspaceProps> = ({
       try {
         const nextState: OrchestratorState = JSON.parse((event as MessageEvent).data);
         setOrchState(nextState);
+        setApprovalState(nextState.pendingApprovals?.length ? {
+          workflowId: nextState.workflowId,
+          activeAgent: nextState.activeAgent,
+          pendingApprovals: nextState.pendingApprovals
+        } : null);
         setLiveLog(nextState.liveLog || '');
 
         if (nextState.activeBlock && nextState.activeBlock !== lastAutoBlockRef.current) {
@@ -480,6 +499,14 @@ export const TriageWorkspace: React.FC<TriageWorkspaceProps> = ({
   const reviewRounds = orchState?.reviewRounds || [];
   const latestReview = reviewRounds.length > 0 ? reviewRounds[reviewRounds.length - 1] : null;
   const events = orchState?.events || [];
+  const pendingApprovals = approvalState?.workflowId === workflow.id ? approvalState.pendingApprovals ?? [] : [];
+  const awaitingCliApproval = pendingApprovals.length > 0;
+  const approvalAgentLabel = WORKFLOW_STAGES.find((stage) => stage.id === approvalState?.activeAgent)?.label
+    ?? 'Subagente ativo';
+
+  useEffect(() => {
+    if (awaitingCliApproval && activityDialogRef.current?.open) setActivityTab('approvals');
+  }, [awaitingCliApproval, workflow.id]);
 
   const totalSubtasks = plan
     ? plan.phases.reduce((acc, ph) => acc + ph.subtasks.length, 0)
@@ -611,7 +638,9 @@ export const TriageWorkspace: React.FC<TriageWorkspaceProps> = ({
   };
 
   const installedClis = availableClis.filter((c) => c.installed);
-  const statusBadge = getStatusBadgeInfo(status);
+  const statusBadge = awaitingCliApproval
+    ? { label: 'Aguardando sua aprovação', className: 'bg-amber-500/10 text-warning border-amber-500/30' }
+    : getStatusBadgeInfo(status);
 
   // Badges de cada um dos 3 Blocos (mesma estética da engrenagem)
   const block1Badge = (() => {
@@ -708,6 +737,7 @@ export const TriageWorkspace: React.FC<TriageWorkspaceProps> = ({
               {workflow.worktreeName}
             </h1>
             <span
+              aria-live="polite"
               className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-0.5 rounded-full border ${statusBadge.className}`}
             >
               {statusBadge.spinning ? (
@@ -800,11 +830,13 @@ export const TriageWorkspace: React.FC<TriageWorkspaceProps> = ({
           <button
             type="button"
             onClick={(event) => {
+              if (awaitingCliApproval) setActivityTab('approvals');
+              else if (activityTab === 'approvals') setActivityTab('events');
               event.currentTarget.focus();
               activityDialogRef.current?.showModal();
               scrollActivityLog();
             }}
-            aria-label="Atividade do Orquestrador"
+            aria-label={awaitingCliApproval ? 'Atividade do Orquestrador com aprovação pendente' : 'Atividade do Orquestrador'}
             aria-haspopup="dialog"
             aria-controls={activityDialogId}
             title="Atividade do Orquestrador"
@@ -812,7 +844,11 @@ export const TriageWorkspace: React.FC<TriageWorkspaceProps> = ({
           >
             <Activity className="w-3.5 h-3.5 text-accent" aria-hidden="true" />
             <span className="hidden xl:inline">Atividade</span>
-            {events.length > 0 && (
+            {awaitingCliApproval ? (
+              <span className="rounded-full bg-amber-500/15 px-1.5 text-[10px] text-warning-strong">
+                {pendingApprovals.length}
+              </span>
+            ) : events.length > 0 && (
               <span className="text-[10px] px-1.5 rounded-full bg-surface-muted text-foreground-tertiary">
                 {events.length}
               </span>
@@ -996,14 +1032,45 @@ export const TriageWorkspace: React.FC<TriageWorkspaceProps> = ({
                     </button>
                   )}
                 </div>
-                <p className="whitespace-pre-wrap break-words text-xs text-foreground-secondary">
-                  {triageConclusion.justification}
-                </p>
+                <MarkdownContent content={triageConclusion.justification} size="xs" />
                 {triageConclusion.readiness !== 'ready' && triageConclusion.pendingDetails && (
-                  <details className="text-xs text-foreground-tertiary">
-                    <summary className="cursor-pointer font-medium">Pendências e incertezas</summary>
-                    <div className="mt-1 whitespace-pre-wrap break-words">{triageConclusion.pendingDetails}</div>
-                  </details>
+                  <div className="space-y-2 rounded-lg border border-line/80 bg-canvas/60 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsPendingCollapsed((prev) => !prev)}
+                        aria-expanded={!isPendingCollapsed}
+                        aria-controls={pendingContentId}
+                        className="flex cursor-pointer items-center gap-1.5 text-xs font-medium text-foreground-secondary transition-colors hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                      >
+                        {isPendingCollapsed ? (
+                          <ChevronDown className="h-3.5 w-3.5 text-foreground-muted" aria-hidden="true" />
+                        ) : (
+                          <ChevronUp className="h-3.5 w-3.5 text-foreground-muted" aria-hidden="true" />
+                        )}
+                        <span>Pendências e incertezas</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowPendingModal(true)}
+                        aria-label="Expandir Pendências e incertezas"
+                        aria-haspopup="dialog"
+                        aria-controls={pendingDialogId}
+                        className="flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-panel px-2 py-1 text-xs font-medium text-foreground-tertiary transition-colors hover:border-line-strong hover:bg-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                      >
+                        <Maximize2 className="h-3.5 w-3.5 text-accent" aria-hidden="true" />
+                        Expandir
+                      </button>
+                    </div>
+                    {!isPendingCollapsed && (
+                      <div
+                        id={pendingContentId}
+                        className="max-h-[340px] overflow-y-auto rounded-lg border border-line/70 bg-canvas p-3"
+                      >
+                        <MarkdownContent content={triageConclusion.pendingDetails} size="xs" />
+                      </div>
+                    )}
+                  </div>
                 )}
                 {triageDescriptionChanged ? (
                   <p className="text-xs text-warning-strong">A descrição mudou. Refaça a triagem antes de planejar.</p>
@@ -1083,11 +1150,9 @@ export const TriageWorkspace: React.FC<TriageWorkspaceProps> = ({
                 title="Artefato de Triagem"
                 icon={Sparkles}
                 artifactPath={orchState?.triageArtifactPath ? '.workflow/01-triage.md' : undefined}
-                renderContent={() =>
+                renderContent={(expanded) =>
                   triageOutput ? (
-                    <div className="whitespace-pre-wrap leading-relaxed text-foreground-secondary">
-                      {triageOutput}
-                    </div>
+                    <MarkdownContent content={triageOutput} size={expanded ? 'sm' : 'xs'} />
                   ) : (
                     <div className="flex h-full items-center justify-center py-10 text-center text-foreground-muted">
                       O artefato de Triagem aparecerá aqui após iniciar o Bloco 1.
@@ -1628,9 +1693,34 @@ export const TriageWorkspace: React.FC<TriageWorkspaceProps> = ({
             >
               Log ao vivo do CLI
             </button>
+            {(awaitingCliApproval || activityTab === 'approvals') && (
+              <button
+                type="button"
+                onClick={() => setActivityTab('approvals')}
+                aria-pressed={activityTab === 'approvals'}
+                className={`cursor-pointer rounded-md px-3 py-1.5 text-xs font-medium ${
+                  activityTab === 'approvals' ? 'bg-amber-500/15 text-warning-strong' : 'text-warning hover:bg-surface-muted'
+                }`}
+              >
+                Aprovações ({pendingApprovals.length})
+              </button>
+            )}
           </div>
 
-          {activityTab === 'events' ? (
+          {activityTab === 'approvals' ? (
+            <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto overscroll-contain p-4 sm:p-5">
+              {awaitingCliApproval ? pendingApprovals.map((approval) => (
+                <CliApprovalCard
+                  key={approval.id}
+                  workflowId={workflow.id}
+                  agentLabel={approvalAgentLabel}
+                  approval={approval}
+                />
+              )) : (
+                <p role="status" className="text-center text-xs text-foreground-muted">Nenhuma aprovação pendente.</p>
+              )}
+            </div>
+          ) : activityTab === 'events' ? (
             <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto overscroll-contain p-4 sm:p-5">
               {events.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-center text-xs text-foreground-muted">
@@ -1682,6 +1772,82 @@ export const TriageWorkspace: React.FC<TriageWorkspaceProps> = ({
           )}
         </div>
       </dialog>
+
+      <ModalDialog
+        isOpen={Boolean(
+          showPendingModal &&
+            triageConclusion &&
+            triageConclusion.readiness !== 'ready' &&
+            triageConclusion.pendingDetails
+        )}
+        onClose={() => setShowPendingModal(false)}
+        id={pendingDialogId}
+        ariaLabelledBy={`${pendingDialogId}-title`}
+        className="w-[calc(100%_-_2rem)] max-w-6xl rounded-2xl border border-line bg-panel shadow-2xl"
+      >
+        {triageConclusion && triageConclusion.readiness !== 'ready' && triageConclusion.pendingDetails && (
+          <div className="flex max-h-[calc(100dvh_-_2rem_-_2px)] flex-col">
+            <header className="flex shrink-0 items-center justify-between gap-3 border-b border-line bg-surface px-4 py-3 sm:px-6">
+              <div className="flex min-w-0 items-center gap-3">
+                <div
+                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border ${
+                    triageConclusion.readiness === 'blocked'
+                      ? 'border-red-500/30 bg-red-500/10 text-danger'
+                      : 'border-amber-500/30 bg-amber-500/10 text-warning'
+                  }`}
+                >
+                  <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+                </div>
+                <div className="min-w-0">
+                  <h2
+                    id={`${pendingDialogId}-title`}
+                    className="text-base font-semibold leading-snug text-foreground sm:text-lg"
+                  >
+                    Pendências e incertezas
+                  </h2>
+                  <p className="mt-0.5 text-xs text-foreground-muted">
+                    Prontidão para planejamento: {READINESS_LABELS[triageConclusion.readiness]}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowPendingModal(false)}
+                aria-label="Fechar Pendências e incertezas"
+                className="shrink-0 cursor-pointer rounded-lg p-2 text-foreground-subtle transition-colors hover:bg-surface-muted hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </header>
+
+            <div
+              role="region"
+              aria-label="Conteúdo das pendências e incertezas"
+              tabIndex={0}
+              className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain break-words p-4 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent sm:p-6"
+            >
+              <div className="rounded-xl border border-line bg-surface/60 p-3.5">
+                <p className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-foreground-muted">
+                  Justificativa
+                </p>
+                <MarkdownContent content={triageConclusion.justification} size="sm" />
+              </div>
+
+              <MarkdownContent content={triageConclusion.pendingDetails} size="sm" />
+
+              {triageDescriptionChanged ? (
+                <p className="text-xs text-warning-strong">
+                  A descrição mudou. Refaça a triagem antes de planejar.
+                </p>
+              ) : status === 'triage_blocked' ? (
+                <p className="text-xs text-foreground-tertiary">
+                  Resolva as pendências e selecione Refazer triagem.
+                </p>
+              ) : null}
+            </div>
+          </div>
+        )}
+      </ModalDialog>
     </div>
   );
 };
