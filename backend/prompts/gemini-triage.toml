@@ -1,0 +1,5 @@
+# Em execução não interativa, sair do modo plan libera ferramentas de escrita.
+[[rule]]
+toolName = ["exit_plan_mode", "write_file", "replace", "run_shell_command"]
+decision = "deny"
+priority = 999
